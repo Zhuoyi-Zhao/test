@@ -1,0 +1,124 @@
+clear
+clc
+
+global probability cost alpha arrival optQ optMU optMU_buff optMU_NO_buff L
+
+tic;
+
+%% Model Setup
+M = 4;
+vector_p = 0.05:0.05:1;
+L = [3;5;7;4];
+num_setups = length(vector_p);
+num_iterations = 10;
+T = 1;
+set_simplified = 1;
+h1 = 1; % Initial age
+z1 = 0; % MUST BE LOWER THAN H1
+
+%% Parameters Setup
+optimal_cost_Rand = zeros(1, num_setups);
+optimal_cost_Max_Weight_Age_debt = zeros(1, num_setups);
+optimal_cost_LowerBound_stoch = zeros(1, num_setups);
+
+%% Simulations
+for count = 1:num_setups
+    count
+    K = 50000;
+    
+    cost = zeros(M,1);
+    alpha=[4;8;2;1];
+    arrival=[1;1;1;1];
+    probability=[vector_p(count);0.4;0.6;0.8]; 
+    p = probability;
+    A = alpha;
+    Arr = arrival;
+    
+    Lower_Bound_find_q(M); % Finding the optQ
+    optimal_cost_LowerBound_stoch(count) = sum(alpha .* (1 + 1 ./ optQ)) / (2 * M);
+    disp('Lower Bound for Stochastic Arrivals')
+    
+    optMU = sqrt(A ./ p .* (3 * L.^2 - L) ./ (2 .* L));
+    sum_optMU = sum(optMU);
+    optMU = optMU / sum_optMU;
+    
+    optMU_NO_buff = sqrt(alpha ./ (arrival .* probability));
+    sum_optMU_NO_buff = sum(optMU_NO_buff);
+    optMU_NO_buff = optMU_NO_buff / sum_optMU_NO_buff;
+    
+    Random_find_mu_buffered_BerBer1(M) % Finding the optMU_buff
+    optimal_cost_Rand(count) = (sum(sqrt(A ./ p .* (3 * L.^2 - L) ./ (2 .* L))))^2 / M + sum(A .* 3 / 2) / M;
+    disp('Randomized Policy')
+    
+    %% Optimize Achievable_AoI using Gradient Descent
+    set_Policy = 0; % 0: Age-Debt Policy
+    % Initial Achievable_AoI
+    Achievable_AoI = (1 ./ p ./ optMU .* (3 * L.^2 - L) ./ (2 .* L))/5 + 1 * 3 / 2;
+    
+    % Set gradient descent parameters
+    max_iter = 200;
+    tolerance = 1e-6;
+    learning_step = 0.02*Achievable_AoI; % Learning rate, may need to adjust for convergence
+    previous_cost = 0;
+    
+    % Initialize variables to keep track of the best total cost and Achievable_AoI
+    best_total_cost = Inf;
+    best_Achievable_AoI = Achievable_AoI;
+    
+    for iter = 1:max_iter
+        % Run simulation to get current per_stream_AoI and total_cost
+        set_Policy = 0;
+        [Q, total_cost] = LQ_MaxWeight_and_Greedy_simulation_stochastic(K, T, M, h1, z1, num_iterations, set_Policy, Achievable_AoI);
+        total_cost = total_cost / (M * T);
+        
+        % Check if total_cost is NaN or Inf
+        if isnan(total_cost) || isinf(total_cost)
+            warning('Total cost is NaN or Inf, adjusting learning rate or initial Achievable_AoI may help.');
+            break;
+        end
+        
+        % Update best_total_cost and best_Achievable_AoI if current total_cost is lower
+        if total_cost < best_total_cost
+            best_total_cost = total_cost;
+            best_Achievable_AoI = Achievable_AoI;
+        end
+        
+        % Update Achievable_AoI
+        for node_index = 1:M   
+            if Q(node_index) > Achievable_AoI(node_index) *20
+                Achievable_AoI(node_index) = Achievable_AoI(node_index) + 0.2*learning_step(node_index);
+            else
+                Achievable_AoI(node_index) = Achievable_AoI(node_index) - learning_step(node_index);
+            end
+        end
+        fprintf('Iteration %d, Total Cost: %f\n', iter, total_cost);
+        % Ensure Achievable_AoI is non-negative
+        Achievable_AoI = max(Achievable_AoI, 0);
+        
+        previous_cost = total_cost;
+    end
+    
+    % After gradient descent, use the best Achievable_AoI to run final simulation with K=50000
+    Achievable_AoI = best_Achievable_AoI;
+    K = 5000;
+    [Q, total_cost] = LQ_MaxWeight_and_Greedy_simulation_stochastic(K, T, M, h1, z1, num_iterations, set_Policy, Achievable_AoI);
+    total_cost = total_cost / (M * T);
+    
+    % Store the final cost
+    optimal_cost_Max_Weight_Age_debt(count) = total_cost;
+    disp(['Age-Debt Policy optimized with Gradient Descent, final cost: ', num2str(total_cost)]);
+    toc
+end
+
+% Plotting
+figure(4)
+hold on
+[Rand_plot] = plot(vector_p, optimal_cost_Rand, 'bo--', 'LineWidth', 3, 'MarkerSize', 10);
+[Age_Debt_plot] = plot(vector_p, optimal_cost_Max_Weight_Age_debt, 'rx--', 'LineWidth', 3, 'MarkerSize', 10);
+[Lower_Bound] = plot(vector_p, optimal_cost_LowerBound_stoch, 'k-', 'LineWidth', 3);
+legend([Rand_plot, Age_Debt_plot, Lower_Bound], 'Randomized', 'Age-Debt (Optimized)', 'Lower Bound', 'Location', 'NorthWest');
+ylabel('Expected Weighted Sum AoI')
+xlabel('Channel Reliability of Stream 1, p_1')
+hold off
+
+toc;

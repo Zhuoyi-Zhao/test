@@ -1,0 +1,205 @@
+% 参数设置
+N = 3;        % 源的数量，可以调整为需要的值
+L = 1;        % 成功传输次数的阈值，设置为1
+A_max = 10;    % AoI 的最大值
+p_succ = 0.5; % 成功传输的概率
+
+% 生成所有可能的状态
+a_values = 1:A_max;
+
+% 初始化状态列表和映射
+stateID = 0;
+stateMap = containers.Map(); % 从状态向量到状态ID的映射
+stateList = {}; % 从状态ID到状态向量的映射
+
+% 生成所有状态
+[stateList, stateMap, numStates] = generateStates(N, a_values);
+
+% 动作空间
+actions = 1:N; % 动作为要调度的源的索引
+numActions = length(actions);
+
+% 预计算转移概率和成本
+[P, C] = computeTransitionAndCost(N, A_max, p_succ, stateList, stateMap, actions);
+
+% 初始化策略
+policy = ones(numStates, 1);
+
+% 策略迭代算法
+maxIter = 1000;
+epsilon = 1e-6;
+avgCost = 0;
+
+for iter = 1:maxIter
+    % 策略评估
+    [J, avgCost_new] = policyEvaluation(policy, P, C, numStates);
+    
+    % 策略改进
+    policy_stable = true;
+    for sID = 1:numStates
+        old_action = policy(sID);
+        action_costs = zeros(numActions, 1);
+        for a = actions
+            % 即时成本
+            cost = C(sID, a);
+            % 预期下一个状态的值
+            nextStates = P{sID, a}.nextStates;
+            probs = P{sID, a}.probs;
+            expected_J = sum(probs .* J(nextStates));
+            action_costs(a) = cost - avgCost_new + expected_J;
+        end
+        % 选择最小化相对值函数的动作
+        [~, min_action] = min(action_costs);
+        policy(sID) = min_action;
+        if old_action ~= min_action
+            policy_stable = false;
+        end
+    end
+    if policy_stable
+        fprintf('策略在第 %d 次迭代后稳定\n', iter);
+        break;
+    end
+    % 更新平均成本
+    avgCost = avgCost_new;
+end
+
+% 输出最优策略
+fprintf('最优调度策略：\n');
+for sID = 1:numStates
+    s = stateList{sID};
+    fprintf('状态 [%s]: 调度源 %d\n', num2str(s), policy(sID));
+end
+
+% 辅助函数：生成所有状态
+function [stateList, stateMap, numStates] = generateStates(N, a_values)
+    % 初始化
+    stateList = {};
+    stateMap = containers.Map();
+    % 为每个源创建状态空间
+    args = cell(1, N);
+    for i = 1:N
+        args{i} = a_values;
+    end
+    % 使用 allcomb 生成所有可能的状态组合
+    stateVectors = allcomb(args{:});
+    numStates = size(stateVectors, 1);
+    for idx = 1:numStates
+        state = stateVectors(idx, :);
+        % 确保状态为行向量
+        state = state(:)';
+        stateList{idx} = state;
+        key = stateKey(state);
+        stateMap(key) = idx;
+    end
+end
+
+% 辅助函数：计算转移概率和成本
+function [P, C] = computeTransitionAndCost(N, A_max, p_succ, stateList, stateMap, actions)
+    numStates = length(stateList);
+    P = cell(numStates, length(actions));
+    C = zeros(numStates, length(actions));
+    for sID = 1:numStates
+        s = stateList{sID};
+        for a = actions % 动作为要调度的源
+            % 初始化
+            nextStates = [];
+            probs = [];
+            % 即时成本为所有源的 AoI 之和
+            C(sID, a) = s();
+            % 成功和失败两种结果
+            for outcome = {'success', 'failure'}
+                if strcmp(outcome{1}, 'success')
+                    prob = p_succ;
+                else
+                    prob = 1 - p_succ;
+                end
+                s_next = s;
+                % 更新调度源的状态
+                i = a;
+                a_i = s(i);
+                if strcmp(outcome{1}, 'success')
+                    a_i_new = 1; % 成功传输，AoI 重置为 1
+                else
+                    a_i_new = min(a_i + 1, A_max); % 失败，AoI 增加 1
+                end
+                s_next(i) = a_i_new;
+                % 更新其他源的 AoI
+                for j = 1:N
+                    if j ~= i
+                        a_j = s(j);
+                        a_j_new = min(a_j + 1, A_max);
+                        s_next(j) = a_j_new;
+                    end
+                end
+                % 确保 s_next 为行向量
+                s_next = s_next(:)';
+                % 获取下一个状态的 ID
+                key_next = stateKey(s_next);
+                if isKey(stateMap, key_next)
+                    s_next_ID = stateMap(key_next);
+                else
+                    error('状态未找到：%s', key_next);
+                end
+                nextStates = [nextStates; s_next_ID];
+                probs = [probs; prob];
+            end
+            P{sID, a}.nextStates = nextStates;
+            P{sID, a}.probs = probs;
+        end
+    end
+end
+
+% 辅助函数：策略评估
+function [J, avgCost] = policyEvaluation(policy, P, C, numStates)
+    % 初始化线性方程组
+    A = zeros(numStates, numStates);
+    b = zeros(numStates, 1);
+    for sID = 1:numStates
+        a = policy(sID);
+        cost = C(sID, a);
+        nextStates = P{sID, a}.nextStates;
+        probs = P{sID, a}.probs;
+        A(sID, sID) = 1;
+        for idx = 1:length(nextStates)
+            s_next_ID = nextStates(idx);
+            prob = probs(idx);
+            A(sID, s_next_ID) = A(sID, s_next_ID) - prob;
+        end
+        b(sID) = cost;
+    end
+    % 增加平均成本变量 avgCost，构建增广矩阵
+    A_aug = [A, -ones(numStates, 1); ones(1, numStates), 0];
+    b_aug = [b; 0];
+    % 解线性方程组
+    x = A_aug \ b_aug;
+    J = x(1:numStates);
+    avgCost = x(end);
+end
+
+% 辅助函数：生成状态的键值
+function key = stateKey(state)
+    % 确保状态为行向量
+    state = state(:)';
+    key = mat2str(state);
+end
+
+% 辅助函数：生成所有组合
+function combs = allcomb(varargin)
+    % 检查输入参数
+    narginchk(1, Inf);
+    % 确保所有输入都是数值数组
+    args = varargin;
+    n = nargin;
+    for i = 1:n
+        if ~isnumeric(args{i})
+            error('所有输入参数都应为数值数组。');
+        end
+    end
+    % 使用 ndgrid 生成网格
+    [F{1:n}] = ndgrid(args{:});
+    % 将结果转换为组合
+    for i = n:-1:1
+        G(:, i) = F{i}(:);
+    end
+    combs = G;
+end
